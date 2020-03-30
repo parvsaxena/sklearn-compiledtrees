@@ -8,7 +8,7 @@ import six
 from sklearn.base import RegressorMixin
 from sklearn.tree.tree import DecisionTreeRegressor, DTYPE, DOUBLE
 from sklearn.ensemble.gradient_boosting import GradientBoostingRegressor
-from sklearn.ensemble.forest import ForestRegressor
+from sklearn.ensemble.forest import ForestRegressor, RandomForestClassifier
 
 from compiledtrees import _compiled
 from compiledtrees import code_gen as cg
@@ -94,6 +94,14 @@ class CompiledRegressionPredictor(RegressorMixin):
                 individual_learner_weight=1.0 / clf.n_estimators,
                 initial_value=0.0, n_jobs=n_jobs)
 
+        if isinstance(clf, RandomForestClassifier):
+            print ("Going for classifier")
+            n_features = clf.n_features_
+            files = cg.code_gen_ensemble(
+                trees=[e.tree_ for e in clf.estimators_],
+                individual_learner_weight=1.0 / clf.n_estimators,
+                initial_value=0.0, n_jobs=n_jobs, n_classes=clf.estimators_[0].tree_.max_n_classes)
+
         assert n_features is not None
         assert files is not None
 
@@ -131,6 +139,8 @@ class CompiledRegressionPredictor(RegressorMixin):
                     np.asarray(clf.estimators_).size and
                     all(cls.compilable(e)
                         for e in np.asarray(clf.estimators_).flat))
+        if isinstance(clf, RandomForestClassifier):
+            return True
         return False
 
     def predict(self, X):

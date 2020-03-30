@@ -5,6 +5,7 @@ from __future__ import print_function
 
 from distutils import sysconfig
 
+import numpy as np
 import contextlib
 import os
 import subprocess
@@ -18,6 +19,7 @@ if platform.system() == 'Windows':
     delete_files = False
 else:
     CXX_COMPILER = sysconfig.get_config_var('CXX')
+    # Set to False to see files in /tmp/
     delete_files = True
 
 EVALUATE_FN_NAME = "evaluate"
@@ -50,7 +52,7 @@ class CodeGenerator(object):
         self.write(postamble)
 
 
-def code_gen_tree(tree, evaluate_fn=EVALUATE_FN_NAME, gen=None):
+def code_gen_tree(tree, n_classes, evaluate_fn=EVALUATE_FN_NAME, gen=None):
     """
     Generates C code representing the evaluation of a tree.
 
@@ -75,8 +77,13 @@ def code_gen_tree(tree, evaluate_fn=EVALUATE_FN_NAME, gen=None):
 
     def recur(node):
         if tree.children_left[node] == -1:
-            assert tree.value[node].size == 1
-            gen.write("return {0};".format(tree.value[node].item()))
+            # Add the sum part
+            for i in range(0, n_classes):
+                # print("Prediction Value is", i, tree.value[node][0][i])
+                gen.write(" result[{0}] += (float){1}; ".format(i, (float)(tree.value[node][0][i])/np.sum(tree.value[node][0])))
+            # assert tree.value[node].size == 1
+            # print("Tree node value is ", i, tree.value[node])
+            # gen.write("return {0};".format(1))
             return
 
         branch = "if (f[{feature}] <= {threshold}f) {{".format(
@@ -89,7 +96,7 @@ def code_gen_tree(tree, evaluate_fn=EVALUATE_FN_NAME, gen=None):
             recur(tree.children_right[node])
 
     with gen.bracketed('extern "C" {', "}"):
-        fn_decl = "{inline} double {name}(float* f) {{".format(
+        fn_decl = "{inline} void {name}(float* f, double *result) {{".format(
             inline=ALWAYS_INLINE,
             name=evaluate_fn)
         with gen.bracketed(fn_decl, "}"):
@@ -97,18 +104,18 @@ def code_gen_tree(tree, evaluate_fn=EVALUATE_FN_NAME, gen=None):
     return gen.file
 
 
-def _gen_tree(i, tree):
+def _gen_tree(i, tree, n_classes):
     """
     Generates cpp code for i'th tree.
     Moved out of code_gen_ensemble scope for parallelization.
     """
     name = "{name}_{index}".format(name=EVALUATE_FN_NAME, index=i)
     gen_tree = CodeGenerator()
-    return code_gen_tree(tree, name, gen_tree)
+    return code_gen_tree(tree=tree, n_classes=n_classes, evaluate_fn=name, gen=gen_tree)
 
 
 def code_gen_ensemble(trees, individual_learner_weight, initial_value,
-                      gen=None, n_jobs=1):
+                      n_classes, gen=None, n_jobs=1):
     """
     Writes code similar to:
 
@@ -156,28 +163,40 @@ def code_gen_ensemble(trees, individual_learner_weight, initial_value,
 
     to the given CodeGenerator object.
     """
-
+    print ("Max classes is", n_classes)
     if gen is None:
         gen = CodeGenerator()
 
-    tree_files = [_gen_tree(i, tree) for i, tree in enumerate(trees)]
-
+    tree_files = [_gen_tree(i, tree, n_classes) for i, tree in enumerate(trees)]
+    gen.write("#include <stdio.h>")
     with gen.bracketed('extern "C" {', "}"):
         # add dummy definitions if you will compile in parallel
         for i, tree in enumerate(trees):
             name = "{name}_{index}".format(name=EVALUATE_FN_NAME, index=i)
-            gen.write("double {name}(float* f);".format(name=name))
+            gen.write("void {name}(float* f, double* result);".format(name=name))
 
         fn_decl = "double {name}(float* f) {{".format(name=EVALUATE_FN_NAME)
         with gen.bracketed(fn_decl, "}"):
-            gen.write("double result = {0};".format(initial_value))
+            gen.write("double result[{0}] = {{0.0f}};".format(tree.max_n_classes))
             for i, _ in enumerate(trees):
-                increment = "result += {name}_{index}(f) * {weight};".format(
+                increment = "{name}_{index}(f, result);".format(
                     name=EVALUATE_FN_NAME,
-                    index=i,
-                    weight=individual_learner_weight)
+                    index=i,)
                 gen.write(increment)
-            gen.write("return result;")
+            # TODO: Return argmax here
+            # gen.write("printf(\"%d %d %d \\n\", result[0], result[1], result[2]);")
+            gen.write("double max_value = {0};".format(0))
+            gen.write("int max_index = {0};".format(-1))
+            loop_decl = "for(int i=0; i<{0}; i++) {{".format(tree.max_n_classes)
+            with gen.bracketed(loop_decl, "}"):
+                gen.write("result[i]/= {0} + (double)0.0;".format(len(trees)))
+                if_decl = "if (max_value < result[i]) {"
+                with gen.bracketed(if_decl, "}"):
+                    gen.write("max_index = i;")
+                    gen.write("max_value = result[i] + (double)0.0;")
+                # gen.write(" }")
+            # gen.write("printf(\"Max index is %d \\n\", max_index);")
+            gen.write("return max_index + (double)0.0;")
     return tree_files + [gen.file]
 
 
@@ -247,4 +266,5 @@ def compile_code_to_object(files, n_jobs=1):
               [f.name for f in o_files] +
               ["-fPIC", "-flto", "-o", so_f.name, "-O3", "-pipe"])
 
+    print("so are", so_f)
     return so_f
